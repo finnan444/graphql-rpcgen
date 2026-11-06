@@ -830,7 +830,7 @@ just test-one registry     # by test name
 just ci                    # fmt-check, lints as errors, tests
 ```
 
-204 tests, none of which need a network:
+205 tests, none of which need a network:
 
 - **semantic** (96) — every validation rule, the error-code registry, path
   versioning, union tags, which constraint may sit on which type, plus
@@ -844,7 +844,7 @@ just ci                    # fmt-check, lints as errors, tests
 - **unit** (34) — config defaults and TOML rejection, the `rpcgen_version`
   requirement and every way it can fail, template variable validation,
   identifier casing
-- **auth** (14) — `@auth` on the trait signature, the handler's extractors, the
+- **auth** (15) — `@auth` on the trait signature, the handler's extractors, the
   role guard ahead of the body, the client's role map, and the rejections that
   keep a declaration from being decorative
 - **mcp** (6) — `@mcp` inheritance, the `x-mcp` flag in the OpenAPI document,
