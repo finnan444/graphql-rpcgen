@@ -316,3 +316,54 @@ type S @service {
     assert!(e.contains("@auth applies to a @service"), "{e}");
     Ok(())
 }
+
+/// The browser mirrors the server's role checks, so it reads the role from the
+/// same declaration the generated handler enforces: a role the service sets is
+/// inherited, an operation's own rule wins whole, and one without a role is not
+/// listed.
+#[test]
+fn the_typescript_client_lists_each_operations_role() -> TestResult {
+    let api = graphql_rpcgen::compile_str(&format!(
+        r#"{PRELUDE}{SDL}
+type Releases @service @auth(require: session, role: "content_release") {{
+  "Inherits the service's role."
+  start(input: GetInput!): Thing!
+    @mutation
+    @rpc(path: "/releases/start")
+    @throws(codes: ["role_required"])
+
+  "Restates the rule without a role, so it needs none."
+  list(input: GetInput!): Thing! @query @rpc(path: "/releases/list") @auth(require: session)
+}}
+"#
+    ))?;
+    let out = graphql_rpcgen::generate_typescript::generate(&api);
+
+    assert!(
+        out.contains(
+            "export const OPERATION_ROLES = {\n  \
+             'Guarded.start': 'content_manager',\n  \
+             'Releases.start': 'content_release',\n\
+             } as const\n"
+        ),
+        "{out}"
+    );
+    Ok(())
+}
+
+/// An API that names no role gains no export, so its generated client stays as
+/// it was.
+#[test]
+fn an_api_without_roles_emits_no_role_map() -> TestResult {
+    let api = graphql_rpcgen::compile_str(&format!(
+        r#"{PRELUDE}
+type Open @service @auth(require: session) {{
+  get(input: GetInput!): Thing! @query @rpc(path: "/get")
+}}
+"#
+    ))?;
+    let out = graphql_rpcgen::generate_typescript::generate(&api);
+
+    assert!(!out.contains("OPERATION_ROLES"), "{out}");
+    Ok(())
+}

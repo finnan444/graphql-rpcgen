@@ -551,6 +551,20 @@ compiler requires `role_required` in `@throws`: the check answers with that
 code, and an operation may only answer with what it declares — undeclared, it
 would narrow to `internal_error` and a denial would read as a server fault.
 
+The TypeScript client carries the same declaration, so a UI that says who may
+do what reads it rather than restating it by hand:
+
+```ts
+export const OPERATION_ROLES = {
+  'Documents.revert': 'content_admin',
+} as const
+```
+
+Keys are `Service.operation`, in SDL order; only operations with a role are
+listed, a service's role included, and an API with none emits no map. A key
+that no longer exists fails the consumer's type check. The map says what the
+server asks for; the server still decides.
+
 **Absence of `@auth` means `public`.** Silence is not a claim about who may
 call, so protection is opt-in and an SDL predating the directive generates
 exactly what it did before. `@auth` bare means `require: session`.
@@ -805,7 +819,7 @@ just test-one registry     # by test name
 just ci                    # fmt-check, lints as errors, tests
 ```
 
-156 tests, none of which need a network:
+158 tests, none of which need a network:
 
 - **semantic** (60) — every validation rule, the error-code registry, path
   versioning, union tags, which constraint may sit on which type, plus
@@ -819,9 +833,9 @@ just ci                    # fmt-check, lints as errors, tests
 - **unit** (32) — config defaults and TOML rejection, the `rpcgen_version`
   requirement and every way it can fail, template variable validation,
   identifier casing
-- **auth** (12) — `@auth` on the trait signature, the handler's extractors, the
-  role guard ahead of the body, and the rejections that keep a declaration from
-  being decorative
+- **auth** (14) — `@auth` on the trait signature, the handler's extractors, the
+  role guard ahead of the body, the client's role map, and the rejections that
+  keep a declaration from being decorative
 - **mcp** (6) — `@mcp` inheritance, the `x-mcp` flag in the OpenAPI document,
   and the rejections of shapes a tool call cannot honour
 - **streaming** (7) — `@subscription` and `@raw` on both sides: the signature,

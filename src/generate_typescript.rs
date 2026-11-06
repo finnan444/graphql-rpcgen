@@ -17,6 +17,7 @@ pub fn generate(api: &Api) -> String {
     emit_error_types(&mut out, api);
     emit_client(&mut out);
     emit_services(&mut out, api);
+    emit_operation_roles(&mut out, api);
     emit_api_object(&mut out, api);
 
     out
@@ -572,6 +573,37 @@ fn emit_services(out: &mut String, api: &Api) {
             service.name, service.name
         );
     }
+}
+
+/// `OPERATION_ROLES`: the role `@auth(role:)` asks of each operation, keyed
+/// `Service.operation`, in SDL order.
+///
+/// The server checks the role in the generated handler; this is the same
+/// declaration for a client that has to say who may do what — a permissions
+/// screen, a disabled button's reason — without restating it by hand. Only
+/// operations with a role are listed, and an API with none emits nothing.
+fn emit_operation_roles(out: &mut String, api: &Api) {
+    let entries: Vec<(String, &str)> = api
+        .services
+        .iter()
+        .flat_map(|service| {
+            service.operations.iter().filter_map(|op| {
+                let role = op.role.as_deref()?;
+                Some((format!("{}.{}", service.name, op.name), role))
+            })
+        })
+        .collect();
+    if entries.is_empty() {
+        return;
+    }
+    out.push_str(
+        "\n/** The role `@auth(role:)` asks of each operation that names one, keyed `Service.operation`. */\n",
+    );
+    out.push_str("export const OPERATION_ROLES = {\n");
+    for (operation, role) in entries {
+        let _ = writeln!(out, "  {}: {},", quoted(&operation), quoted(role));
+    }
+    out.push_str("} as const\n");
 }
 
 /// The `api` factory: TanStack helpers layered over the call methods.
