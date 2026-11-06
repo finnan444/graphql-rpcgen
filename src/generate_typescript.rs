@@ -580,8 +580,7 @@ fn emit_services(out: &mut String, api: &Api) {
 ///
 /// The server checks the role in the generated handler; this is the same
 /// declaration for a client that has to say who may do what — a permissions
-/// screen, a disabled button's reason — without restating it by hand. Only
-/// operations with a role are listed, and an API with none emits nothing.
+/// screen, a disabled button's reason — without restating it by hand.
 fn emit_operation_roles(out: &mut String, api: &Api) {
     let entries: Vec<(String, &str)> = api
         .services
@@ -597,7 +596,7 @@ fn emit_operation_roles(out: &mut String, api: &Api) {
         return;
     }
     out.push_str(
-        "\n/** The role `@auth(role:)` asks of each operation that names one, keyed `Service.operation`. */\n",
+        "\n/** The role `@auth(role:)` asks of each operation that has one, keyed `Service.operation`. */\n",
     );
     out.push_str("export const OPERATION_ROLES = {\n");
     for (operation, role) in entries {
