@@ -316,3 +316,100 @@ type S @service {
     assert!(e.contains("@auth applies to a @service"), "{e}");
     Ok(())
 }
+
+/// A service that sets a role, declared ahead of `Guarded` and with its
+/// operations out of name order, so a test can tell the declaration order from
+/// the sorted one.
+const RELEASES: &str = r#"
+type Releases @service @auth(require: session, role: "content_release") {
+  "Inherits the service's role."
+  start(input: GetInput!): Thing!
+    @mutation
+    @rpc(path: "/releases/start")
+    @throws(codes: ["role_required"])
+
+  "Inherits it too, declared after `start`."
+  approve(input: GetInput!): Thing!
+    @mutation
+    @rpc(path: "/releases/approve")
+    @throws(codes: ["role_required"])
+
+  "Restates the rule without a role, so it needs none."
+  list(input: GetInput!): Thing! @query @rpc(path: "/releases/list") @auth(require: session)
+
+  "Opens the operation, overriding the service's session and role alike."
+  feed(input: GetInput!): Thing! @query @rpc(path: "/releases/feed") @auth(require: public)
+}
+"#;
+
+fn releases_api() -> TestResult<graphql_rpcgen::ir::Api> {
+    Ok(graphql_rpcgen::compile_str(&format!(
+        "{PRELUDE}{RELEASES}{SDL}"
+    ))?)
+}
+
+/// The handler body for one operation, from its signature to the closing brace.
+fn handler<'a>(out: &'a str, name: &str) -> TestResult<&'a str> {
+    out.split(&format!("async fn {name}<"))
+        .nth(1)
+        .and_then(|s| s.split("\n}").next())
+        .ok_or_else(|| format!("the {name} handler must be emitted").into())
+}
+
+/// A role set on the service is a requirement of each operation that does not
+/// restate the rule, so the server checks it there too; an operation that does
+/// restate it — with a session or opened to the public — carries no role.
+#[test]
+fn a_service_role_is_checked_on_each_operation_that_inherits_it() -> TestResult {
+    let out = generate_rust::generate(&releases_api()?, &Config::default())?;
+    let guard = "ctx.require_role(\"content_release\")";
+
+    for name in ["releases_start", "releases_approve"] {
+        let body = handler(&out, name)?;
+        assert!(body.contains(guard), "{name} must check the role: {body}");
+    }
+    for name in ["releases_list", "releases_feed"] {
+        let body = handler(&out, name)?;
+        assert!(!body.contains("require_role"), "{name} must not: {body}");
+    }
+    Ok(())
+}
+
+/// The browser mirrors the server's role checks, so it reads the role from the
+/// same declaration the generated handler enforces: a role the service sets is
+/// inherited, an operation's own rule wins whole, and one without a role is not
+/// listed. Keys follow the IR's order — by service, then by operation — not the
+/// order the SDL declares them in.
+#[test]
+fn the_typescript_client_lists_each_operations_role() -> TestResult {
+    let out = graphql_rpcgen::generate_typescript::generate(&releases_api()?);
+
+    assert!(
+        out.contains(
+            "export const operationRoles = {\n  \
+             'Guarded.start': 'content_manager',\n  \
+             'Releases.approve': 'content_release',\n  \
+             'Releases.start': 'content_release',\n\
+             } as const\n"
+        ),
+        "{out}"
+    );
+    Ok(())
+}
+
+/// An API that names no role gains no export, so its generated client stays as
+/// it was.
+#[test]
+fn an_api_without_roles_emits_no_role_map() -> TestResult {
+    let api = graphql_rpcgen::compile_str(&format!(
+        r#"{PRELUDE}
+type Open @service @auth(require: session) {{
+  get(input: GetInput!): Thing! @query @rpc(path: "/get")
+}}
+"#
+    ))?;
+    let out = graphql_rpcgen::generate_typescript::generate(&api);
+
+    assert!(!out.contains("operationRoles"), "{out}");
+    Ok(())
+}

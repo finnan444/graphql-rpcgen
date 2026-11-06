@@ -551,6 +551,31 @@ compiler requires `role_required` in `@throws`: the check answers with that
 code, and an operation may only answer with what it declares — undeclared, it
 would narrow to `internal_error` and a denial would read as a server fault.
 
+The TypeScript client carries the same declaration, so a UI that says who may
+do what reads it rather than restating it by hand:
+
+```ts
+export const operationRoles = {
+  'Documents.revert': 'content_admin',
+} as const
+```
+
+Keys are `Service.operation`, sorted by service and then by operation; only
+operations with a role are listed, a service's role included, and an API with
+none emits no map. Under `noImplicitAny` (part of `strict`), a key that no
+longer exists fails the consumer's type check. The map says what the server
+asks for; the server still decides.
+
+Without `noImplicitAny`, an index the map lacks reads as `any`. A parameter
+typed with the map's keys rejects it under any settings:
+
+```ts
+type OperationWithRole = keyof typeof operationRoles
+type Role = (typeof operationRoles)[OperationWithRole]
+
+const roleOf = (op: OperationWithRole): Role => operationRoles[op]
+```
+
 **Absence of `@auth` means `public`.** Silence is not a claim about who may
 call, so protection is opt-in and an SDL predating the directive generates
 exactly what it did before. `@auth` bare means `require: session`.
@@ -805,32 +830,32 @@ just test-one registry     # by test name
 just ci                    # fmt-check, lints as errors, tests
 ```
 
-156 tests, none of which need a network:
+205 tests, none of which need a network:
 
-- **semantic** (60) — every validation rule, the error-code registry, path
+- **semantic** (96) — every validation rule, the error-code registry, path
   versioning, union tags, which constraint may sit on which type, plus
   nullability/list conversion
-- **reuse** (20) — the generator is project-agnostic: a default config
+- **reuse** (21) — the generator is project-agnostic: a default config
   generates, SDL scalars reach all three targets and can override a built-in,
   unmapped scalars fail, outputs are selectable, the types target carries no web
   framework, the server re-exports the types rather than duplicating them, the
   client emits a method per operation, custom templates replace the built-ins,
   and a typo or an escaping tag in a template fails generation
-- **unit** (32) — config defaults and TOML rejection, the `rpcgen_version`
+- **unit** (34) — config defaults and TOML rejection, the `rpcgen_version`
   requirement and every way it can fail, template variable validation,
   identifier casing
-- **auth** (12) — `@auth` on the trait signature, the handler's extractors, the
-  role guard ahead of the body, and the rejections that keep a declaration from
-  being decorative
+- **auth** (15) — `@auth` on the trait signature, the handler's extractors, the
+  role guard ahead of the body, the client's role map, and the rejections that
+  keep a declaration from being decorative
 - **mcp** (6) — `@mcp` inheritance, the `x-mcp` flag in the OpenAPI document,
   and the rejections of shapes a tool call cannot honour
-- **streaming** (7) — `@subscription` and `@raw` on both sides: the signature,
+- **streaming** (10) — `@subscription` and `@raw` on both sides: the signature,
   the route verb, and where the input is read from
-- **snapshots** (6) — Rust, TypeScript, zod and OpenAPI output, determinism, and
+- **snapshots** (7) — Rust, TypeScript, zod and OpenAPI output, determinism, and
   a pass over the whole OpenAPI document for the breaks a per-path assertion
   cannot see: a dangling `$ref`, a duplicated `operationId`, an operation with
   no response
-- **cli** (11) — the binary itself: `generate` writes what `[output]` names and
+- **cli** (14) — the binary itself: `generate` writes what `[output]` names and
   rewrites nothing unchanged, `check` exits non-zero on drift or a missing file
   and names it without repairing it, `--root` is what output paths resolve
   against, and a bad command or a `--config` that does not exist fails instead
