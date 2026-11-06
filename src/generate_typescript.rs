@@ -575,7 +575,7 @@ fn emit_services(out: &mut String, api: &Api) {
     }
 }
 
-/// `OPERATION_ROLES`: the role `@auth(role:)` asks of each operation, keyed
+/// `operationRoles`: the role `@auth(role:)` asks of each operation, keyed
 /// `Service.operation`, sorted by service and then by operation.
 ///
 /// The server checks the role in the generated handler; this is the same
@@ -598,7 +598,7 @@ fn emit_operation_roles(out: &mut String, api: &Api) {
     out.push_str(
         "\n/** The role `@auth(role:)` asks of each operation that has one, keyed `Service.operation`. */\n",
     );
-    out.push_str("export const OPERATION_ROLES = {\n");
+    out.push_str("export const operationRoles = {\n");
     for (operation, role) in entries {
         let _ = writeln!(out, "  {}: {},", quoted(&operation), quoted(role));
     }

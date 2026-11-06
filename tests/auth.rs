@@ -386,7 +386,7 @@ fn the_typescript_client_lists_each_operations_role() -> TestResult {
 
     assert!(
         out.contains(
-            "export const OPERATION_ROLES = {\n  \
+            "export const operationRoles = {\n  \
              'Guarded.start': 'content_manager',\n  \
              'Releases.approve': 'content_release',\n  \
              'Releases.start': 'content_release',\n\
@@ -410,6 +410,6 @@ type Open @service @auth(require: session) {{
     ))?;
     let out = graphql_rpcgen::generate_typescript::generate(&api);
 
-    assert!(!out.contains("OPERATION_ROLES"), "{out}");
+    assert!(!out.contains("operationRoles"), "{out}");
     Ok(())
 }

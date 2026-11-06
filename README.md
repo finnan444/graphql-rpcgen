@@ -555,7 +555,7 @@ The TypeScript client carries the same declaration, so a UI that says who may
 do what reads it rather than restating it by hand:
 
 ```ts
-export const OPERATION_ROLES = {
+export const operationRoles = {
   'Documents.revert': 'content_admin',
 } as const
 ```
