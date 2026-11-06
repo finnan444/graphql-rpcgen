@@ -576,7 +576,7 @@ fn emit_services(out: &mut String, api: &Api) {
 }
 
 /// `OPERATION_ROLES`: the role `@auth(role:)` asks of each operation, keyed
-/// `Service.operation`, in SDL order.
+/// `Service.operation`, sorted by service and then by operation.
 ///
 /// The server checks the role in the generated handler; this is the same
 /// declaration for a client that has to say who may do what — a permissions

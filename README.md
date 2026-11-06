@@ -560,10 +560,11 @@ export const OPERATION_ROLES = {
 } as const
 ```
 
-Keys are `Service.operation`, in SDL order; only operations with a role are
-listed, a service's role included, and an API with none emits no map. A key
-that no longer exists fails the consumer's type check. The map says what the
-server asks for; the server still decides.
+Keys are `Service.operation`, sorted by service and then by operation; only
+operations with a role are listed, a service's role included, and an API with
+none emits no map. Under `noImplicitAny` (part of `strict`), a key that no
+longer exists fails the consumer's type check. The map says what the server
+asks for; the server still decides.
 
 **Absence of `@auth` means `public`.** Silence is not a claim about who may
 call, so protection is opt-in and an SDL predating the directive generates
