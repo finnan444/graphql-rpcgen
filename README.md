@@ -566,6 +566,16 @@ none emits no map. Under `noImplicitAny` (part of `strict`), a key that no
 longer exists fails the consumer's type check. The map says what the server
 asks for; the server still decides.
 
+Without `noImplicitAny`, an index the map lacks reads as `any`. A parameter
+typed with the map's keys rejects it under any settings:
+
+```ts
+type OperationWithRole = keyof typeof operationRoles
+type Role = (typeof operationRoles)[OperationWithRole]
+
+const roleOf = (op: OperationWithRole): Role => operationRoles[op]
+```
+
 **Absence of `@auth` means `public`.** Silence is not a claim about who may
 call, so protection is opt-in and an SDL predating the directive generates
 exactly what it did before. `@auth` bare means `require: session`.
