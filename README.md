@@ -819,18 +819,18 @@ just test-one registry     # by test name
 just ci                    # fmt-check, lints as errors, tests
 ```
 
-158 tests, none of which need a network:
+204 tests, none of which need a network:
 
-- **semantic** (60) — every validation rule, the error-code registry, path
+- **semantic** (96) — every validation rule, the error-code registry, path
   versioning, union tags, which constraint may sit on which type, plus
   nullability/list conversion
-- **reuse** (20) — the generator is project-agnostic: a default config
+- **reuse** (21) — the generator is project-agnostic: a default config
   generates, SDL scalars reach all three targets and can override a built-in,
   unmapped scalars fail, outputs are selectable, the types target carries no web
   framework, the server re-exports the types rather than duplicating them, the
   client emits a method per operation, custom templates replace the built-ins,
   and a typo or an escaping tag in a template fails generation
-- **unit** (32) — config defaults and TOML rejection, the `rpcgen_version`
+- **unit** (34) — config defaults and TOML rejection, the `rpcgen_version`
   requirement and every way it can fail, template variable validation,
   identifier casing
 - **auth** (14) — `@auth` on the trait signature, the handler's extractors, the
@@ -838,13 +838,13 @@ just ci                    # fmt-check, lints as errors, tests
   keep a declaration from being decorative
 - **mcp** (6) — `@mcp` inheritance, the `x-mcp` flag in the OpenAPI document,
   and the rejections of shapes a tool call cannot honour
-- **streaming** (7) — `@subscription` and `@raw` on both sides: the signature,
+- **streaming** (10) — `@subscription` and `@raw` on both sides: the signature,
   the route verb, and where the input is read from
-- **snapshots** (6) — Rust, TypeScript, zod and OpenAPI output, determinism, and
+- **snapshots** (7) — Rust, TypeScript, zod and OpenAPI output, determinism, and
   a pass over the whole OpenAPI document for the breaks a per-path assertion
   cannot see: a dangling `$ref`, a duplicated `operationId`, an operation with
   no response
-- **cli** (11) — the binary itself: `generate` writes what `[output]` names and
+- **cli** (14) — the binary itself: `generate` writes what `[output]` names and
   rewrites nothing unchanged, `check` exits non-zero on drift or a missing file
   and names it without repairing it, `--root` is what output paths resolve
   against, and a bad command or a `--config` that does not exist fails instead
