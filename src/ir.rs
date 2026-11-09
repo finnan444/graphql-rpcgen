@@ -314,10 +314,12 @@ pub struct Operation {
     pub raw_response: Option<Vec<String>>,
     /// What the caller must prove, from `@auth` on the operation or its service.
     pub auth: AuthRequirement,
-    /// The role the session must carry, checked before the method is called.
+    /// The role this operation's permission is assigned to, checked before the
+    /// method is called.
     ///
-    /// Set by `@auth(role:)`. `None` means any authenticated caller, which is
-    /// what most operations want — a role is the exception, not the rule.
+    /// Set by `@auth(role:)`, and the SDL name of a value of the `@roles` enum
+    /// (see [`Roles`]). `None` means any authenticated caller, which is what
+    /// most operations want — a role is the exception, not the rule.
     pub role: Option<String>,
     /// Whether the operation is exposed as an MCP tool, from `@mcp` on the
     /// operation or its service.
@@ -361,13 +363,54 @@ pub struct Service {
     pub operations: Vec<Operation>,
 }
 
+/// The role set and its hierarchy, from the enum marked `@roles`.
+///
+/// Role-based access control as ANSI INCITS 359-2012 defines it: the enum's
+/// values are ROLES, `@inherits` on a value is the role hierarchy (RH), and
+/// `@auth(role:)` on an operation is a permission assignment (PA). Users,
+/// their assignment to roles (UA) and sessions are the implementation's.
+#[derive(Debug, Clone)]
+pub struct Roles {
+    /// Name of the `@roles` enum. Its values are the roles; their wire names
+    /// are the strings a session carries.
+    pub enum_name: String,
+    /// Per role, in declaration order: its SDL name and every role it inherits,
+    /// directly or through another, in declaration order and without itself.
+    ///
+    /// Resolved once here, so no target walks the hierarchy on its own and two
+    /// targets cannot disagree on what a role grants.
+    pub inherits: Vec<(String, Vec<String>)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Api {
     pub types: Vec<ApiType>,
     pub services: Vec<Service>,
+    /// `None` for an API without a `@roles` enum, which then declares no
+    /// `@auth(role:)` either: the compiler refuses one without the other.
+    pub roles: Option<Roles>,
 }
 
 impl Api {
+    /// The `@roles` enum, when the API declares one.
+    pub fn role_enum(&self) -> Option<&EnumType> {
+        let roles = self.roles.as_ref()?;
+        match self.find_type(&roles.enum_name) {
+            Some(ApiType::Enum(e)) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// The string a session carries for the role named `name` in the SDL.
+    ///
+    /// Its `@variant(tag:)` when it has one: an identity provider's role names
+    /// are not always GraphQL identifiers.
+    pub fn role_wire_name<'a>(&'a self, name: &'a str) -> &'a str {
+        self.role_enum()
+            .and_then(|e| e.values.iter().find(|v| v.name == name))
+            .map_or(name, EnumValue::wire_name)
+    }
+
     pub fn find_type(&self, name: &str) -> Option<&ApiType> {
         self.types.iter().find(|t| t.name() == name)
     }

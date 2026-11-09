@@ -11,7 +11,8 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 use graphql_rpcgen::config::Config;
 use graphql_rpcgen::generate_rust;
 
-const PRELUDE: &str = r#"
+/// Everything but the role set, for the tests that need an API without one.
+const BASE: &str = r#"
 scalar UUID
 
 enum ErrorCode {
@@ -23,6 +24,18 @@ enum ErrorCode {
 input GetInput { id: UUID! }
 type Thing { id: UUID! }
 type Event { n: Int! }
+"#;
+
+/// A hierarchy two levels deep, so a test can tell the closure from the direct
+/// edges, and a role whose session name is not a GraphQL identifier.
+const ROLE_SET: &str = r#"
+enum Role @roles {
+  content_translate
+  content_edit @inherits(roles: [content_translate])
+  content_manager @inherits(roles: [content_edit])
+  content_release
+  content_ops @variant(tag: "content-ops")
+}
 "#;
 
 /// One service exercising every requirement against every handler form.
@@ -38,7 +51,7 @@ type Guarded @service @auth(require: session) {
   start(input: GetInput!): Thing!
     @mutation
     @rpc(path: "/start")
-    @auth(require: session, role: "content_manager")
+    @auth(require: session, role: content_manager)
     @throws(codes: ["role_required"])
 
   "A stream still gets its caller."
@@ -53,12 +66,18 @@ type Guarded @service @auth(require: session) {
 "#;
 
 fn server() -> TestResult<String> {
-    let api = graphql_rpcgen::compile_str(&format!("{PRELUDE}{SDL}"))?;
+    let api = graphql_rpcgen::compile_str(&format!("{BASE}{ROLE_SET}{SDL}"))?;
     Ok(generate_rust::generate(&api, &Config::default())?)
 }
 
 fn expect_error(body: &str) -> TestResult<String> {
-    match graphql_rpcgen::compile_str(&format!("{PRELUDE}{body}")) {
+    expect_error_in(&format!("{ROLE_SET}{body}"))
+}
+
+/// Like [`expect_error`], without the role set: for the tests about declaring
+/// one.
+fn expect_error_in(body: &str) -> TestResult<String> {
+    match graphql_rpcgen::compile_str(&format!("{BASE}{body}")) {
         Ok(_) => Err("expected a compile error, but compilation succeeded".into()),
         Err(e) => Ok(e.to_string()),
     }
@@ -120,7 +139,7 @@ fn a_role_is_checked_before_the_method_runs() -> TestResult {
 
     assert!(
         out.contains(
-            "    if let Err(response) = ctx.require_role(\"content_manager\") {\n        \
+            "    if let Err(response) = ctx.require_role(Role::ContentManager) {\n        \
              return response;\n    }\n"
         ),
         "{out}"
@@ -204,7 +223,7 @@ fn an_operation_needing_no_session_gets_no_context() -> TestResult {
 #[test]
 fn an_unannotated_service_is_unchanged() -> TestResult {
     let api = graphql_rpcgen::compile_str(&format!(
-        "{PRELUDE}
+        "{BASE}
 type Plain @service {{
   get(input: GetInput!): Thing! @query @rpc(path: \"/plain\")
 }}
@@ -249,7 +268,7 @@ fn a_role_without_a_session_is_rejected() -> TestResult {
         let e = expect_error(&format!(
             "type S @service {{
   g(input: GetInput!): Thing! @query @rpc(path: \"/g\") \
-   @auth(require: {require}, role: \"admin\") @throws(codes: [\"role_required\"])
+   @auth(require: {require}, role: content_release) @throws(codes: [\"role_required\"])
 }}
 "
         ))?;
@@ -266,7 +285,7 @@ fn a_role_must_declare_the_code_it_answers_with() -> TestResult {
     let e = expect_error(
         r#"
 type S @service {
-  g(input: GetInput!): Thing! @query @rpc(path: "/g") @auth(role: "admin")
+  g(input: GetInput!): Thing! @query @rpc(path: "/g") @auth(role: content_release)
 }
 "#,
     )?;
@@ -287,16 +306,122 @@ type S @service {
     Ok(())
 }
 
+/// A role is a value of the `@roles` enum, and an enum-typed argument takes a
+/// bare value in GraphQL; a string would be a second spelling of it.
 #[test]
-fn an_empty_role_is_rejected() -> TestResult {
+fn a_quoted_role_is_rejected() -> TestResult {
     let e = expect_error(
         r#"
 type S @service {
-  g(input: GetInput!): Thing! @query @rpc(path: "/g") @auth(role: "")
+  g(input: GetInput!): Thing! @query @rpc(path: "/g") @auth(role: "content_release")
+    @throws(codes: ["role_required"])
 }
 "#,
     )?;
-    assert!(e.contains("must not be empty"), "{e}");
+    assert!(e.contains("written bare"), "{e}");
+    Ok(())
+}
+
+/// A role outside the set would reach the server as a name no session
+/// carries, refusing everyone; the compiler refuses it instead.
+#[test]
+fn a_role_outside_the_set_is_rejected() -> TestResult {
+    let e = expect_error(
+        r#"
+type S @service {
+  g(input: GetInput!): Thing! @query @rpc(path: "/g") @auth(role: content_admin)
+    @throws(codes: ["role_required"])
+}
+"#,
+    )?;
+    assert!(
+        e.contains("@auth(role: content_admin) is not a value of the @roles enum `Role`"),
+        "{e}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_role_without_a_role_set_is_rejected() -> TestResult {
+    let e = expect_error_in(
+        r#"
+type S @service {
+  g(input: GetInput!): Thing! @query @rpc(path: "/g") @auth(role: content_release)
+    @throws(codes: ["role_required"])
+}
+"#,
+    )?;
+    assert!(e.contains("needs an enum marked @roles"), "{e}");
+    Ok(())
+}
+
+/// A bare value means something against one set of roles only.
+#[test]
+fn a_second_role_set_is_rejected() -> TestResult {
+    let e = expect_error("enum Other @roles { a }\n")?;
+    assert!(e.contains("an API has one role set"), "{e}");
+    Ok(())
+}
+
+/// The registry names what can go wrong, not who may act. Compiled without
+/// [`BASE`], which declares the registry without `@roles`.
+#[test]
+fn the_error_registry_cannot_be_the_role_set() -> TestResult {
+    let e = match graphql_rpcgen::compile_str(
+        "enum ErrorCode @roles { invalid_body internal_error }\n",
+    ) {
+        Ok(_) => return Err("expected a compile error, but compilation succeeded".into()),
+        Err(e) => e.to_string(),
+    };
+    assert!(e.contains("cannot be @roles"), "{e}");
+    Ok(())
+}
+
+/// The hierarchy is between roles; on any other enum it would read as a grant
+/// that is not made.
+#[test]
+fn inherits_outside_the_role_set_is_rejected() -> TestResult {
+    let e = expect_error("enum Color { red green @inherits(roles: [red]) }\n")?;
+    assert!(
+        e.contains("@inherits applies to a value of the @roles enum"),
+        "{e}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_malformed_hierarchy_is_rejected() -> TestResult {
+    for (set, message) in [
+        (
+            "a b @inherits(roles: [c])",
+            "`b` inherits `c`, which is not one of its values",
+        ),
+        (
+            "a @inherits(roles: [a])",
+            "`a` inherits `a`, which is itself",
+        ),
+        ("a b @inherits(roles: [a, a])", "`b` inherits `a`, twice"),
+        ("a b @inherits(roles: [])", "inherits nothing"),
+        ("a b @inherits(roles: [\"a\"])", "malformed @inherits"),
+    ] {
+        let e = expect_error_in(&format!("enum Role @roles {{ {set} }}\n"))?;
+        assert!(e.contains(message), "{set}: {e}");
+    }
+    Ok(())
+}
+
+/// The standard's role hierarchy is a partial order: roles inheriting each
+/// other grant the same permissions, so they are one role under two names.
+#[test]
+fn a_cycle_in_the_hierarchy_is_rejected() -> TestResult {
+    let e = expect_error_in(
+        "enum Role @roles {\n  a @inherits(roles: [c])\n  b @inherits(roles: [a])\n  \
+         c @inherits(roles: [b])\n  d @inherits(roles: [a])\n}\n",
+    )?;
+    assert!(
+        e.contains("@inherits forms a cycle through `a`, `b`, `c`;"),
+        "{e}"
+    );
     Ok(())
 }
 
@@ -321,7 +446,7 @@ type S @service {
 /// operations out of name order, so a test can tell the declaration order from
 /// the sorted one.
 const RELEASES: &str = r#"
-type Releases @service @auth(require: session, role: "content_release") {
+type Releases @service @auth(require: session, role: content_release) {
   "Inherits the service's role."
   start(input: GetInput!): Thing!
     @mutation
@@ -344,7 +469,7 @@ type Releases @service @auth(require: session, role: "content_release") {
 
 fn releases_api() -> TestResult<graphql_rpcgen::ir::Api> {
     Ok(graphql_rpcgen::compile_str(&format!(
-        "{PRELUDE}{RELEASES}{SDL}"
+        "{BASE}{ROLE_SET}{RELEASES}{SDL}"
     ))?)
 }
 
@@ -362,7 +487,7 @@ fn handler<'a>(out: &'a str, name: &str) -> TestResult<&'a str> {
 #[test]
 fn a_service_role_is_checked_on_each_operation_that_inherits_it() -> TestResult {
     let out = generate_rust::generate(&releases_api()?, &Config::default())?;
-    let guard = "ctx.require_role(\"content_release\")";
+    let guard = "ctx.require_role(Role::ContentRelease)";
 
     for name in ["releases_start", "releases_approve"] {
         let body = handler(&out, name)?;
@@ -415,7 +540,7 @@ fn the_typescript_api_carries_each_operations_role() -> TestResult {
 #[test]
 fn an_api_without_roles_emits_no_role_field() -> TestResult {
     let api = graphql_rpcgen::compile_str(&format!(
-        r#"{PRELUDE}
+        r#"{BASE}
 type Open @service @auth(require: session) {{
   get(input: GetInput!): Thing! @query @rpc(path: "/get")
 }}
@@ -424,5 +549,122 @@ type Open @service @auth(require: session) {{
     let out = graphql_rpcgen::generate_typescript::generate(&api);
 
     assert!(!out.contains("role:"), "{out}");
+    Ok(())
+}
+
+/// A role whose session name is not an identifier is checked by its Rust
+/// variant and carried to the browser by the name the session holds.
+#[test]
+fn a_tagged_role_travels_by_its_wire_name() -> TestResult {
+    let api = graphql_rpcgen::compile_str(&format!(
+        r#"{BASE}{ROLE_SET}
+type Ops @service @auth(require: session, role: content_ops) {{
+  run(input: GetInput!): Thing! @mutation @rpc(path: "/ops/run") @throws(codes: ["role_required"])
+}}
+"#
+    ))?;
+
+    let rust = generate_rust::generate(&api, &Config::default())?;
+    assert!(
+        rust.contains("ctx.require_role(Role::ContentOps)"),
+        "{rust}"
+    );
+    assert!(
+        rust.contains("            \"content-ops\" => Some(Self::ContentOps),\n"),
+        "{rust}"
+    );
+
+    let ts = graphql_rpcgen::generate_typescript::generate(&api);
+    let entry = api_entry(&ts, "ops", "run")?;
+    assert!(
+        entry.contains("        role: 'content-ops' as const,\n"),
+        "{entry}"
+    );
+    Ok(())
+}
+
+/// The server reads a role from the name a session carries, and checks it
+/// against the hierarchy the compiler closed over: each arm lists the role and
+/// everything it inherits, two levels down included.
+#[test]
+fn the_rust_role_set_reads_names_and_follows_the_hierarchy() -> TestResult {
+    let out = server()?;
+
+    assert!(out.contains("\nimpl Role {\n"), "{out}");
+    assert!(
+        out.contains("            \"content_edit\" => Some(Self::ContentEdit),\n"),
+        "{out}"
+    );
+    assert!(out.contains("            _ => None,\n"), "{out}");
+    assert!(
+        out.contains("            Self::ContentEdit => \"content_edit\",\n"),
+        "{out}"
+    );
+    for arm in [
+        "Self::ContentTranslate => matches!(required, Self::ContentTranslate),",
+        "Self::ContentEdit => matches!(required, Self::ContentEdit | Self::ContentTranslate),",
+        "Self::ContentManager => matches!(required, \
+         Self::ContentManager | Self::ContentTranslate | Self::ContentEdit),",
+        "Self::ContentRelease => matches!(required, Self::ContentRelease),",
+    ] {
+        assert!(out.contains(arm), "missing `{arm}`: {out}");
+    }
+    Ok(())
+}
+
+/// The role check takes the role type, so the implementation cannot be asked
+/// about a name outside the set.
+#[test]
+fn the_role_check_takes_the_role_type() -> TestResult {
+    let out = server()?;
+    assert!(
+        out.contains("    fn require_role(&self, role: Role) -> Result<(), Response>;\n"),
+        "{out}"
+    );
+    Ok(())
+}
+
+/// With no role set there is no role type to check against and no operation
+/// asking for one, so the context trait has no role check to implement.
+#[test]
+fn a_session_api_without_roles_has_no_role_check() -> TestResult {
+    let api = graphql_rpcgen::compile_str(&format!(
+        r#"{BASE}
+type Open @service @auth(require: session) {{
+  get(input: GetInput!): Thing! @query @rpc(path: "/get")
+}}
+"#
+    ))?;
+    let out = generate_rust::generate(&api, &Config::default())?;
+
+    assert!(out.contains("pub trait FromRequestContext"), "{out}");
+    assert!(!out.contains("require_role"), "{out}");
+    Ok(())
+}
+
+/// The browser runs the server's hierarchy check, not a copy written by hand.
+#[test]
+fn the_typescript_role_set_lists_roles_and_follows_the_hierarchy() -> TestResult {
+    let out = graphql_rpcgen::generate_typescript::generate(&releases_api()?);
+
+    assert!(
+        out.contains(
+            "export const roles: readonly Role[] = ['content_translate', 'content_edit', \
+             'content_manager', 'content_release', 'content-ops']\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("  'content_manager': ['content_translate', 'content_edit'],\n"),
+        "{out}"
+    );
+    assert!(out.contains("  'content-ops': [],\n"), "{out}");
+    assert!(
+        out.contains(
+            "export function roleAuthorizes(held: Role, required: Role): boolean {\n  \
+             return held === required || roleInherits[held].includes(required)\n}"
+        ),
+        "{out}"
+    );
     Ok(())
 }

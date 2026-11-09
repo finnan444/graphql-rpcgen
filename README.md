@@ -451,7 +451,9 @@ type PaymentInput =
 | `@version(n:)` | OBJECT/FIELD | mount under a `/v{n}` prefix |
 | `@subscription` | FIELD | a stream of events over SSE; the field's type is one event |
 | `@raw(request:, response:, stream:)` | FIELD | a body that is bytes rather than the JSON envelope; `stream: true` hands the request body to the service unread |
-| `@auth(require:, role:)` | OBJECT/FIELD | what the caller must prove; `session` passes a context |
+| `@auth(require:, role:)` | OBJECT/FIELD | what the caller must prove; `session` passes a context; `role` assigns the operation to a role |
+| `@roles` | ENUM | the enum's values are the API's roles |
+| `@inherits(roles:)` | ENUM_VALUE | on a role: the roles it inherits the permissions of |
 | `@mcp(expose:)` | OBJECT/FIELD | the operation is an MCP tool; surfaces as `x-mcp` in OpenAPI |
 | `@throws(codes:)` | FIELD | error codes the operation may return |
 | `@length(min:, max:)` | FIELD/INPUT | `minLength` / `maxLength` |
@@ -502,7 +504,7 @@ type Documents @service @auth(require: session) {
 
   revert(input: RevertInput!): RevertResponse!
     @mutation @rpc(path: "/revert")
-    @auth(require: session, role: "content_admin")
+    @auth(require: session, role: content_admin)
     @throws(codes: ["role_required"])
 
   export(input: ExportInput!): Binary!
@@ -530,7 +532,8 @@ The extractor runs after `State` and before the body, which is the only order
 axum accepts, and the same context reaches every form — a subscription and a raw
 request included.
 
-`role:` is enforced by the **generated** handler, before the service is reached:
+`role:` names a value of the `@roles` enum — see [Roles](#roles-roles-and-inherits)
+— and is enforced by the **generated** handler, before the service is reached:
 
 ```rust
 async fn documents_revert<S: DocumentsService>(
@@ -538,7 +541,7 @@ async fn documents_revert<S: DocumentsService>(
     Ctx(ctx): Ctx<RequestContext>,
     ApiJson(input): ApiJson<RevertInput>,
 ) -> Response {
-    if let Err(response) = ctx.require_role("content_admin") {
+    if let Err(response) = ctx.require_role(Role::ContentAdmin) {
         return response;
     }
     ...
@@ -567,7 +570,22 @@ documents: {
 ```
 
 Only operations with a role carry the field, a service's role included. The
-field says what the server asks for; the server still decides.
+field says what the server asks for; the server still decides. The value is the
+name a session carries for the role, its `@variant(tag:)` when it has one.
+
+**Why the role sits on the entry, and there is no `operationRoles` map.** 0.11
+emitted the roles as a separate map keyed `'Service.operation'`. A control then
+named its operation twice — once to call it, once as a string to look its role
+up — and the two names could be edited apart. On the entry, the role is read
+from the same object the call goes through, so there is nothing to keep in step.
+
+The map is removed rather than kept beside the field. Both would be generated
+from one declaration and could not disagree, but two shapes for one fact leave
+every consumer to choose between them, and the codebase to drift toward both.
+What the map also served — the list of roles — is [`roles`](#roles-roles-and-inherits),
+which lists the whole set rather than only the roles some operation names. A
+lookup by operation name has no replacement; a consumer that needs one builds it
+from `createApi`.
 
 **Absence of `@auth` means `public`.** Silence is not a claim about who may
 call, so protection is opt-in and an SDL predating the directive generates
@@ -587,20 +605,117 @@ pub trait DocumentsService: Clone + Send + Sync + 'static {
 }
 ```
 
-`FromRequestContext` is generated beside the extractor and asks for two things:
+`FromRequestContext` is generated beside the extractor. It asks for the caller,
+and, in an API with a `@roles` enum, for the role check:
 
 ```rust
 pub trait FromRequestContext: Sized + Send + Sync + 'static {
     fn from_parts(parts: &mut Parts)
         -> impl Future<Output = Result<Self, Response>> + Send;
-    fn require_role(&self, role: &str) -> Result<(), Response>;
+    fn require_role(&self, role: Role) -> Result<(), Response>;
 }
 ```
+
+Without a `@roles` enum there is no role type to check against and no operation
+asking for one, so `require_role` is not part of the trait.
 
 What a session *is* — the cookie, the exchange with the identity provider, the
 user lookup, what a denial says — is the server's, and no schema can describe
 it. The SDL says which operations need one; the implementation says what one is.
 An API with no session-guarded operation compiles none of this.
+
+### Roles: `@roles` and `@inherits`
+
+Access control follows **ANSI INCITS 359-2012, Role Based Access Control**:
+Core RBAC together with General Hierarchical RBAC. Static and dynamic separation
+of duty (SSD, DSD) are not implemented. The terms below are the standard's, and
+an API documenting its own policy should use them in the same sense.
+
+```graphql
+"Who may do what."
+enum Role @roles {
+  content_read
+  content_translate
+  "Writes whole records, so it writes their translations too."
+  content_edit @inherits(roles: [content_translate])
+  content_admin
+}
+```
+
+Where each element of the model lives:
+
+| Standard | In the SDL | Generated | Left to the implementation |
+| --- | --- | --- | --- |
+| USERS | — | — | who a session names |
+| ROLES | the values of the `@roles` enum | the enum, `from_name`, `as_str`; TS: the literal union and `roles` | — |
+| RH, role hierarchy | `@inherits(roles:)` on a value | `Role::authorizes`; TS: `roleAuthorizes` | — |
+| OPS, operations | an operation of a `@service` | its handler and client entry | — |
+| OBS, objects | — | — | whatever the operation acts on |
+| PRMS, permissions | an operation on every object it takes | — | a permission narrowed to some objects — a field, a protected branch — checked in the method, since `@auth` cannot see the request |
+| PA, permission assignment | `@auth(role:)` | the role guard; `role` on the `createApi` entry | — |
+| UA, user assignment | — | — | whoever issues sessions |
+| SESSIONS | `require: session` | the `Ctx` extractor | which of the user's roles are active |
+| CheckAccess | — | the guard calling `require_role` | `require_role` |
+
+#### The names, and why
+
+- **`@roles`** marks the enum whose values are ROLES. A directive rather than a
+  reserved type name, as `ErrorCode` is, because `Role` is a common name for
+  data — a game's `enum Role { tank healer }` — and a reserved name would turn
+  such an enum into an access-control set without being asked. An API has one
+  role set: `role:` names a bare value, which means something against one enum
+  only.
+- **`@inherits(roles:)`** is the hierarchy. The standard defines it as
+  inheritance: a senior role acquires the permissions of its juniors. The senior
+  declares it, the way a type names what it extends, so a role's definition
+  shows everything it grants. Inheritance is transitive; the compiler closes over
+  it once, and both targets read that closure.
+- **`role:`** on `@auth` is a permission assignment: the operation, which is the
+  permission, is assigned to this role. It is **one** role. The standard lets a
+  permission be assigned to several, but under a hierarchy assigning it to the
+  most junior role that should hold it already reaches every role above. A list
+  would add a second way to say the same thing, and an "any of" or "all of"
+  question with it. A permission that seems to need two roles is either a
+  missing role or a condition on the request, and the second belongs in the
+  method.
+- **`require_role`** is CheckAccess narrowed to what `@auth` can see: the
+  permission assignment is already compiled into the handler, so what remains is
+  whether a role active in the session is `role` or inherits it. It keeps its
+  0.11 name; the parameter is now the role type, and the contract names the
+  hierarchy instead of leaving it to the implementation to remember.
+- **`authorizes`**: the standard calls the roles a user holds through
+  assignment and inheritance together their *authorized roles*. `a.authorizes(b)`
+  reads as that: holding `a` authorizes `b`.
+- **`role_required`** is the code the check answers with, so an operation with a
+  role must list it in `@throws`.
+
+#### How to use them
+
+- Assign each operation to the most junior role that should reach it, and let
+  `@inherits` carry it upward. An operation assigned to a senior role is out of
+  every junior's reach, and opening it to one later means moving the assignment
+  rather than adding a grant.
+- Read the names a session carries with `Role::from_name`. `None` is a name
+  outside the set — usually another application's role — and is skipped, not an
+  error.
+- Implement `require_role` over the session's active roles:
+  `active.iter().any(|held| held.authorizes(role))`, answering `role_required`
+  when none does.
+- In the browser, gate a control on the operation it calls:
+  `roleAuthorizes(held, api.documents.revert.role)`. `roles` lists the whole set,
+  in declaration order.
+
+The compiler refuses: a second `@roles` enum; `@roles` on `ErrorCode`; a `role:`
+that is quoted, missing from the set, or used without a set; `@inherits` outside
+the role set, empty, naming a value the enum lacks, the role itself or one role
+twice; and a cycle, since the standard's hierarchy is a partial order and roles
+that inherit each other are one role under two names.
+
+**Upgrading from 0.11.** Declare the role set as a `@roles` enum and write each
+`role:` bare (`role: content_admin`). `require_role` takes the role type.
+`operationRoles` is gone: read the role from the `createApi` entry and the list
+from `roles`. An API with a session and no roles drops `require_role` from its
+`FromRequestContext` impl.
 
 ### `@mcp`
 
@@ -823,7 +938,7 @@ just test-one registry     # by test name
 just ci                    # fmt-check, lints as errors, tests
 ```
 
-205 tests, none of which need a network:
+217 tests, none of which need a network:
 
 - **semantic** (96) — every validation rule, the error-code registry, path
   versioning, union tags, which constraint may sit on which type, plus
@@ -837,9 +952,10 @@ just ci                    # fmt-check, lints as errors, tests
 - **unit** (34) — config defaults and TOML rejection, the `rpcgen_version`
   requirement and every way it can fail, template variable validation,
   identifier casing
-- **auth** (15) — `@auth` on the trait signature, the handler's extractors, the
-  role guard ahead of the body, the client's per-operation `role` field, and
-  the rejections that keep a declaration from being decorative
+- **auth** (27) — `@auth` on the trait signature, the handler's extractors, the
+  role guard ahead of the body, the client's per-operation `role` field, the
+  `@roles` set and its `@inherits` closure on both sides, and the rejections
+  that keep a declaration from being decorative
 - **mcp** (6) — `@mcp` inheritance, the `x-mcp` flag in the OpenAPI document,
   and the rejections of shapes a tool call cannot honour
 - **streaming** (10) — `@subscription` and `@raw` on both sides: the signature,
@@ -857,7 +973,8 @@ just ci                    # fmt-check, lints as errors, tests
   scratch cargo project, pinning the wire shape and the arm constraints at
   runtime rather than in emitted text
 - **raw_wire** (1) — all three Rust targets compiled for an SDL reaching every
-  `@raw` form and a `@subscription` beside them, which is the only thing that
+  `@raw` form, a `@subscription` and a role reached through `@inherits` beside
+  them, which is the only thing that
   checks the emitted handlers, client methods and streaming runtime against
   rustc rather than against a `contains`; the router is then served on a local
   port and a streamed body larger than `RAW_BODY_LIMIT` is sent through it

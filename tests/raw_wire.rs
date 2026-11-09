@@ -47,8 +47,15 @@ enum ErrorCode {
   invalid_body
   internal_error
   not_found
+  role_required
   "Declared by no operation, so every generated set keeps a reachable fallback."
   database_error
+}
+
+"A junior role and one inheriting it, so the guard below passes by inheritance."
+enum Role @roles {
+  files_read
+  files_write @inherits(roles: [files_read])
 }
 
 type Event { line: String! }
@@ -131,7 +138,8 @@ type Files @service {
     @mutation
     @rpc(path: "/echo")
     @raw(request: ["application/octet-stream"], response: ["application/octet-stream"], stream: true)
-    @auth(require: session)
+    @auth(require: session, role: files_read)
+    @throws(codes: ["role_required"])
 }
 "#;
 
@@ -153,7 +161,9 @@ use futures_util::io::AsyncReadExt;
 pub struct Files;
 
 /// A caller every request resolves to, so `echo` reaches its extractor and its
-/// call with a context without the test having a session to present.
+/// call with a context without the test having a session to present. Assigned
+/// `files_write`, so `echo` — assigned to `files_read` — is reached through the
+/// generated hierarchy rather than a direct match.
 pub struct Caller;
 
 impl server::FromRequestContext for Caller {
@@ -163,8 +173,13 @@ impl server::FromRequestContext for Caller {
         Ok(Caller)
     }
 
-    fn require_role(&self, _role: &str) -> Result<(), axum::response::Response> {
-        Ok(())
+    fn require_role(&self, role: server::Role) -> Result<(), axum::response::Response> {
+        if server::Role::FilesWrite.authorizes(role) {
+            return Ok(());
+        }
+        Err(axum::response::IntoResponse::into_response(
+            axum::http::StatusCode::FORBIDDEN,
+        ))
     }
 }
 

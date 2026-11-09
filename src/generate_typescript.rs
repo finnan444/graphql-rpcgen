@@ -14,6 +14,7 @@ pub fn generate(api: &Api) -> String {
     out.push_str(HEADER);
 
     emit_types(&mut out, api);
+    emit_roles(&mut out, api);
     emit_error_types(&mut out, api);
     emit_client(&mut out);
     emit_services(&mut out, api);
@@ -574,6 +575,53 @@ fn emit_services(out: &mut String, api: &Api) {
     }
 }
 
+/// The `@roles` enum's runtime half: the list of roles and the hierarchy
+/// check, so a client that says who may do what runs the server's check rather
+/// than a copy of it.
+///
+/// The type itself is the enum's literal union, emitted with the other types.
+/// The closure stays unexported: `roleAuthorizes` is the question a caller has,
+/// and the table is how this file answers it.
+fn emit_roles(out: &mut String, api: &Api) {
+    let (Some(roles), Some(e)) = (&api.roles, api.role_enum()) else {
+        return;
+    };
+    let ty = &e.name;
+    let wire = |name: &str| quoted(api.role_wire_name(name));
+
+    let list = e
+        .values
+        .iter()
+        .map(|v| quoted(v.wire_name()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        out,
+        "\n/** Every role of `{ty}`, in declaration order. */\nexport const roles: readonly {ty}[] = [{list}]"
+    );
+
+    let _ = writeln!(
+        out,
+        "\n/** Per role, every role it inherits through `@inherits`, directly or not. */\nconst roleInherits: Record<{ty}, readonly {ty}[]> = {{"
+    );
+    for (role, inherited) in &roles.inherits {
+        let inherited = inherited
+            .iter()
+            .map(|name| wire(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(out, "  {}: [{inherited}],", wire(role));
+    }
+    out.push_str("}\n");
+
+    let _ = writeln!(
+        out,
+        "\n/** Whether a user assigned `held` is authorized for `required`: the same role, or one `held` inherits. */\n\
+         export function roleAuthorizes(held: {ty}, required: {ty}): boolean {{\n  \
+         return held === required || roleInherits[held].includes(required)\n}}"
+    );
+}
+
 /// The `api` factory: per operation, its call, the TanStack helpers layered
 /// over it, and the role `@auth(role:)` asks for.
 fn emit_api_object(out: &mut String, api: &Api) {
@@ -617,7 +665,11 @@ export interface MutationOptionsResult<Input, Output> {
             };
             let _ = writeln!(out, "      {}: {{", op.name);
             if let Some(role) = op.role.as_deref() {
-                let _ = writeln!(out, "        role: {} as const,", quoted(role));
+                let _ = writeln!(
+                    out,
+                    "        role: {} as const,",
+                    quoted(api.role_wire_name(role))
+                );
             }
             let verb = if op.kind == OperationKind::Subscription {
                 "subscribe"

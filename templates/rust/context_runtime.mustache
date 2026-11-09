@@ -30,7 +30,8 @@ where
     }
 }
 
-/// What a request context must do to be extracted and role-checked.
+/// What a request context must do to be extracted and, for an API with roles,
+/// role-checked.
 ///
 /// The generator names this contract; the project's own context type implements
 /// it. Named for what it does rather than for what it holds, so it does not
@@ -52,11 +53,4 @@ pub trait FromRequestContext: Sized + Send + Sync + 'static {
     fn from_parts(
         parts: &mut axum::http::request::Parts,
     ) -> impl std::future::Future<Output = Result<Self, Response>> + Send;
-
-    /// Whether this caller holds `role`, as `@auth(role:)` demands.
-    ///
-    /// Returns the response to send when they do not, so the policy — which
-    /// code, which message — stays with the project rather than being fixed
-    /// here. Only called for an operation that declares a role.
-    fn require_role(&self, role: &str) -> Result<(), Response>;
-}
+{{{require_role}}}}

@@ -112,9 +112,11 @@ const HANDLER_VARS: [&str; 11] = [
 ];
 /// Variables the runtime template may reference, besides `template_vars`.
 const RUNTIME_VARS: [&str; 2] = ["invalid_body_code", "internal_error_code"];
-/// The context runtime interpolates nothing: it names the project's trait and
-/// the extractor, both spelled the same in every project.
-const CONTEXT_RUNTIME_VARS: [&str; 0] = [];
+/// The context runtime names the project's trait and the extractor, both
+/// spelled the same in every project. `require_role` is the trait's role check,
+/// empty for an API without a `@roles` enum: with no role type there is no
+/// signature to give it, and nothing would call it.
+const CONTEXT_RUNTIME_VARS: [&str; 1] = ["require_role"];
 /// Nor does the stream runtime.
 const STREAM_RUNTIME_VARS: [&str; 0] = [];
 /// Variables the router template may reference, besides `template_vars`.
@@ -325,7 +327,11 @@ pub fn generate(api: &Api, config: &Config) -> Result<String, CompileError> {
         .flat_map(|service| &service.operations)
         .any(needs_context)
     {
-        out.push_str(&templates.context_runtime.render(&templates.vars(&[]))?);
+        out.push_str(
+            &templates
+                .context_runtime
+                .render(&templates.vars(&[("require_role", &require_role_method(api))]))?,
+        );
     }
 
     // Without a types module of their own, the types belong here: the server
@@ -370,7 +376,12 @@ fn emit_types(out: &mut String, api: &Api) {
         match ty {
             ApiType::Scalar(s) if s.rust_newtype => emit_scalar_newtype(out, s),
             ApiType::Scalar(_) => {}
-            ApiType::Enum(e) => emit_enum(out, e),
+            ApiType::Enum(e) => {
+                emit_enum(out, e);
+                if api.roles.as_ref().is_some_and(|r| r.enum_name == e.name) {
+                    emit_role_impl(out, api, e);
+                }
+            }
             ApiType::Object(o) => emit_object(out, api, o),
             ApiType::InputObject(i) => emit_input_object(out, api, i),
             ApiType::Union(u) => emit_union(out, u),
@@ -526,6 +537,66 @@ fn emit_enum(out: &mut String, e: &EnumType) {
         let _ = writeln!(out, "    {},", pascal_case(&v.name));
     }
     out.push_str("}\n");
+}
+
+/// What the server needs of the `@roles` enum beyond the wire type: reading a
+/// role from the name a session carries, and the role hierarchy.
+///
+/// The hierarchy is matched out per role rather than walked at runtime, since
+/// the compiler has already closed over it: a role's arm lists itself and every
+/// role it inherits, and nothing else is authorized by it.
+fn emit_role_impl(out: &mut String, api: &Api, e: &EnumType) {
+    let Some(roles) = &api.roles else { return };
+    let variant = |name: &str| format!("Self::{}", pascal_case(name));
+
+    let _ = writeln!(out, "\nimpl {} {{", e.name);
+    out.push_str(
+        "    /// The role a session names `name`, or `None` for a name outside this set,\n    \
+         /// such as a role of another application.\n    \
+         pub fn from_name(name: &str) -> Option<Self> {\n        match name {\n",
+    );
+    for v in &e.values {
+        let _ = writeln!(
+            out,
+            "            {:?} => Some({}),",
+            v.wire_name(),
+            variant(&v.name)
+        );
+    }
+    out.push_str("            _ => None,\n        }\n    }\n");
+
+    out.push_str(
+        "\n    /// The name a session carries for this role.\n    \
+         pub fn as_str(self) -> &'static str {\n        match self {\n",
+    );
+    for v in &e.values {
+        let _ = writeln!(
+            out,
+            "            {} => {:?},",
+            variant(&v.name),
+            v.wire_name()
+        );
+    }
+    out.push_str("        }\n    }\n");
+
+    out.push_str(
+        "\n    /// Whether a user assigned `self` is authorized for `required`: the same\n    \
+         /// role, or one `self` inherits through `@inherits`, directly or not.\n    \
+         pub fn authorizes(self, required: Self) -> bool {\n        match self {\n",
+    );
+    for (role, inherited) in &roles.inherits {
+        let granted = std::iter::once(role)
+            .chain(inherited)
+            .map(|name| variant(name))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let _ = writeln!(
+            out,
+            "            {} => matches!(required, {granted}),",
+            variant(role)
+        );
+    }
+    out.push_str("        }\n    }\n}\n");
 }
 
 /// The error registry, as a `treat` code enum.
@@ -1181,7 +1252,7 @@ fn emit_service(
             ("body_field", &body_field),
             ("context_extractor", &context_extractor(op)),
             ("context_arg", &context_arg),
-            ("role_guard", &role_guard(op)),
+            ("role_guard", &role_guard(api, op)),
         ]))?);
     }
 
@@ -1252,14 +1323,38 @@ fn context_extractor(op: &Operation) -> String {
 }
 
 /// The role gate, emitted between the extractors and the call.
-fn role_guard(op: &Operation) -> String {
-    match (&op.role, op.auth.has_context()) {
-        (Some(role), true) => format!(
-            "    if let Err(response) = ctx.require_role({role:?}) {{\n        \
-             return response;\n    }}\n"
+fn role_guard(api: &Api, op: &Operation) -> String {
+    match (&op.role, &api.roles, op.auth.has_context()) {
+        (Some(role), Some(roles), true) => format!(
+            "    if let Err(response) = ctx.require_role({}::{}) {{\n        \
+             return response;\n    }}\n",
+            roles.enum_name,
+            pascal_case(role)
         ),
         _ => String::new(),
     }
+}
+
+/// `FromRequestContext::require_role`, for an API with a `@roles` enum.
+///
+/// Its contract is the standard's CheckAccess narrowed to what `@auth` can see:
+/// the permission is the operation, already assigned to `role` in the SDL, so
+/// what remains is whether the session's roles reach it.
+fn require_role_method(api: &Api) -> String {
+    let Some(roles) = &api.roles else {
+        return String::new();
+    };
+    format!(
+        "\n    /// Whether this caller is authorized for `role`, as `@auth(role:)` demands:\n    \
+         /// whether a role active in the session is `role` or inherits it — see\n    \
+         /// [`{name}::authorizes`].\n    \
+         ///\n    \
+         /// Returns the response to send when it is not, so the policy — which\n    \
+         /// code, which message — stays with the project rather than being fixed\n    \
+         /// here. Only called for an operation that declares a role.\n    \
+         fn require_role(&self, role: {name}) -> Result<(), Response>;\n",
+        name = roles.enum_name
+    )
 }
 
 /// The handler form for one operation: where its input comes from, and what

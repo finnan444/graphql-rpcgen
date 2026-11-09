@@ -4,7 +4,7 @@
 //! inconsistent SDL happens here.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use graphql_parser::schema::{
     Definition, Directive, EnumValue as GqlEnumValue, Field as GqlField, InputValue,
@@ -37,6 +37,8 @@ const KNOWN_DIRECTIVES: &[&str] = &[
     "discriminator",
     "variant",
     "scalar",
+    "roles",
+    "inherits",
 ];
 
 const DEFAULT_DISCRIMINATOR: &str = "kind";
@@ -88,6 +90,19 @@ struct Analyzer<'a> {
     /// file has been read: the tag sits on the member, which may be declared
     /// after — or in another file than — the union that names it.
     variant_tags: HashMap<String, String>,
+    /// Every enum marked `@roles`, with the `@inherits` each value declares.
+    /// Resolved into [`Roles`] once every file is read, since there must be
+    /// exactly one and only then is it known whether there is.
+    role_enums: Vec<RoleEnum>,
+}
+
+/// An enum marked `@roles`, as declared: where, and what each value inherits
+/// directly.
+struct RoleEnum {
+    file: PathBuf,
+    pos: Pos,
+    name: String,
+    inherits: Vec<(String, Vec<String>)>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -97,6 +112,7 @@ impl<'a> Analyzer<'a> {
             errors: Errors::default(),
             declared: HashMap::new(),
             variant_tags: HashMap::new(),
+            role_enums: Vec::new(),
         }
     }
 
@@ -139,13 +155,18 @@ impl<'a> Analyzer<'a> {
 
         self.resolve_variant_tags(&mut types);
         self.resolve_sibling_contents(&mut types);
+        let roles = self.resolve_roles();
 
         // Sorting here is what makes generation deterministic; every generator
         // walks these vectors in order.
         types.sort_by(|a, b| a.name().cmp(b.name()));
         services.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let api = Api { types, services };
+        let api = Api {
+            types,
+            services,
+            roles,
+        };
         self.check_references(&api);
         self.check_paths(&api);
         self.check_operation_ids(&api);
@@ -155,6 +176,7 @@ impl<'a> Analyzer<'a> {
         self.check_constraints(&api);
         self.check_raw_bodies(&api);
         self.check_union_discriminators(&api);
+        self.check_operation_roles(&api);
 
         self.errors.into_result()?;
         Ok(api)
@@ -370,12 +392,40 @@ impl<'a> Analyzer<'a> {
                 }));
             }
             TypeDefinition::Enum(t) => {
-                self.check_directives(file, &t.directives, &[]);
+                self.check_directives(file, &t.directives, &["roles"]);
+                let is_roles = find_directive(&t.directives, "roles").is_some();
+                // The registry names what can go wrong, not who may act, and
+                // its Rust form is not the one a role enum gets.
+                if is_roles && t.name == ERROR_CODE_ENUM {
+                    self.errors.push(CompileError::at(
+                        format!(
+                            "`{ERROR_CODE_ENUM}` is the error code registry; it cannot be @roles"
+                        ),
+                        file,
+                        t.position,
+                    ));
+                }
+                let mut inherits = Vec::new();
                 let values: Vec<EnumValue> = t
                     .values
                     .iter()
                     .map(|v| {
-                        self.check_directives(file, &v.directives, &["variant"]);
+                        self.check_directives(file, &v.directives, &["variant", "inherits"]);
+                        match (is_roles, find_directive(&v.directives, "inherits")) {
+                            (true, _) => inherits
+                                .push((v.name.clone(), self.inherited_roles(file, &t.name, v))),
+                            // The hierarchy is between roles; on any other
+                            // enum it would read as a grant that is not made.
+                            (false, Some(d)) => self.errors.push(CompileError::at(
+                                format!(
+                                    "enum `{}`: @inherits applies to a value of the @roles enum",
+                                    t.name
+                                ),
+                                file,
+                                d.position,
+                            )),
+                            (false, None) => {}
+                        }
                         EnumValue {
                             name: v.name.clone(),
                             description: v.description.clone(),
@@ -383,6 +433,14 @@ impl<'a> Analyzer<'a> {
                         }
                     })
                     .collect();
+                if is_roles {
+                    self.role_enums.push(RoleEnum {
+                        file: file.to_path_buf(),
+                        pos: t.position,
+                        name: t.name.clone(),
+                        inherits,
+                    });
+                }
                 self.check_enum_wire_names(file, &t.name, &values, t.position);
                 types.push(ApiType::Enum(EnumType {
                     name: t.name.clone(),
@@ -916,21 +974,28 @@ impl<'a> Analyzer<'a> {
             }
         };
 
-        let role = match string_arg(d, "role") {
-            Some(role) if role.trim().is_empty() => {
+        // A role is a value of the `@roles` enum, so it is written bare, as an
+        // enum-typed argument is in GraphQL. Whether the value exists is checked
+        // once every file is read: the enum may be declared after the service.
+        let role = match d.arguments.iter().find(|(n, _)| n == "role") {
+            None => None,
+            Some((_, Value::Enum(role))) => Some(role.clone()),
+            Some(_) => {
                 self.errors.push(CompileError::at(
-                    format!("`{owner}`: @auth(role:) must not be empty"),
+                    format!(
+                        "`{owner}`: @auth(role:) names a value of the @roles enum, written bare — \
+                         `role: content_edit`, not a string"
+                    ),
                     file,
                     pos,
                 ));
                 return None;
             }
-            role => role,
         };
 
-        // A role is a fact about a person, and the other two requirements name
-        // no person: a token is not a user, and `public` is nobody. Demanding a
-        // role there could never be satisfied.
+        // A role is assigned to a user, and the other two requirements name no
+        // user: a token is not one, and `public` is nobody. ANSI RBAC's users
+        // are people, so demanding a role there could never be satisfied.
         if role.is_some() && require != AuthRequirement::Session {
             self.errors.push(CompileError::at(
                 format!(
@@ -1288,6 +1353,168 @@ impl<'a> Analyzer<'a> {
                     d.position,
                 ));
                 None
+            }
+        }
+    }
+
+    /// The roles `@inherits(roles:)` on one value of the `@roles` enum names, as
+    /// written. Whether each exists and whether together they form a hierarchy
+    /// is [`Self::resolve_roles`]'s to check, once the enum is complete.
+    fn inherited_roles(
+        &mut self,
+        file: &Path,
+        owner: &str,
+        value: &GqlEnumValue<'static, String>,
+    ) -> Vec<String> {
+        let Some(d) = find_directive(&value.directives, "inherits") else {
+            return Vec::new();
+        };
+        match enum_list_arg(d, "roles") {
+            Some(roles) if !roles.is_empty() => roles,
+            Some(_) => {
+                self.errors.push(CompileError::at(
+                    format!(
+                        "enum `{owner}`: value `{}` inherits nothing; drop the @inherits",
+                        value.name
+                    ),
+                    file,
+                    d.position,
+                ));
+                Vec::new()
+            }
+            None => {
+                self.errors.push(CompileError::at(
+                    format!(
+                        "enum `{owner}`: value `{}` has a malformed @inherits, expected `roles:` \
+                         as a list of role names written bare",
+                        value.name
+                    ),
+                    file,
+                    d.position,
+                ));
+                Vec::new()
+            }
+        }
+    }
+
+    /// The `@roles` enum resolved into [`Roles`]: each `@inherits` checked
+    /// against the enum's values, and the hierarchy closed over.
+    ///
+    /// The standard requires the role hierarchy to be a partial order, so a
+    /// cycle is refused rather than collapsed: roles that inherit each other
+    /// grant the same permissions, which makes them one role under two names.
+    fn resolve_roles(&mut self) -> Option<Roles> {
+        let mut enums = std::mem::take(&mut self.role_enums).into_iter();
+        let RoleEnum {
+            file,
+            pos,
+            name,
+            inherits,
+        } = enums.next()?;
+        // `@auth(role:)` names a bare value, which only means something against
+        // one set of roles.
+        for other in enums {
+            self.errors.push(CompileError::at(
+                format!(
+                    "enum `{}`: @roles is already on `{name}`; an API has one role set",
+                    other.name
+                ),
+                &other.file,
+                other.pos,
+            ));
+        }
+
+        let roles: Vec<&str> = inherits.iter().map(|(role, _)| role.as_str()).collect();
+        let mut direct: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (role, juniors) in &inherits {
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            for junior in juniors {
+                let problem = if !roles.contains(&junior.as_str()) {
+                    Some("which is not one of its values")
+                } else if junior == role {
+                    Some("which is itself")
+                } else if !seen.insert(junior) {
+                    Some("twice")
+                } else {
+                    None
+                };
+                match problem {
+                    Some(problem) => self.errors.push(CompileError::at(
+                        format!("enum `{name}`: `{role}` inherits `{junior}`, {problem}"),
+                        &file,
+                        pos,
+                    )),
+                    None => direct.entry(role).or_default().push(junior),
+                }
+            }
+        }
+
+        let mut resolved = Vec::new();
+        let mut cyclic = Vec::new();
+        for &role in &roles {
+            let mut reached: BTreeSet<&str> = BTreeSet::new();
+            let mut pending: Vec<&str> = direct.get(role).cloned().unwrap_or_default();
+            while let Some(next) = pending.pop() {
+                if reached.insert(next) {
+                    pending.extend(direct.get(next).into_iter().flatten().copied());
+                }
+            }
+            if reached.contains(role) {
+                cyclic.push(format!("`{role}`"));
+            }
+            let inherited = roles
+                .iter()
+                .filter(|other| **other != role && reached.contains(*other))
+                .map(|other| other.to_string())
+                .collect();
+            resolved.push((role.to_string(), inherited));
+        }
+        if !cyclic.is_empty() {
+            self.errors.push(CompileError::at(
+                format!(
+                    "enum `{name}`: @inherits forms a cycle through {}; a role hierarchy is a \
+                     partial order, and roles that inherit each other are one role",
+                    cyclic.join(", ")
+                ),
+                &file,
+                pos,
+            ));
+        }
+
+        Some(Roles {
+            enum_name: name,
+            inherits: resolved,
+        })
+    }
+
+    /// Every `@auth(role:)` names a value of the `@roles` enum.
+    ///
+    /// Here rather than where the directive is read, since the enum may be
+    /// declared after — or in another file than — the service naming it. A role
+    /// outside the set would otherwise reach the server as a name no session
+    /// can carry, refusing everyone.
+    fn check_operation_roles(&mut self, api: &Api) {
+        let values: Option<BTreeSet<&str>> = api
+            .role_enum()
+            .map(|e| e.values.iter().map(|v| v.name.as_str()).collect());
+        for s in &api.services {
+            for op in &s.operations {
+                let Some(role) = &op.role else { continue };
+                match &values {
+                    None => self.errors.push(CompileError::new(format!(
+                        "`{}.{}`: @auth(role: {role}) needs an enum marked @roles listing it",
+                        s.name, op.name
+                    ))),
+                    Some(values) if !values.contains(role.as_str()) => {
+                        self.errors.push(CompileError::new(format!(
+                            "`{}.{}`: @auth(role: {role}) is not a value of the @roles enum `{}`",
+                            s.name,
+                            op.name,
+                            api.roles.as_ref().map_or("", |r| r.enum_name.as_str())
+                        )));
+                    }
+                    Some(_) => {}
+                }
             }
         }
     }
@@ -2323,6 +2550,26 @@ fn float_arg(d: &Directive<'static, String>, name: &str) -> Option<f64> {
         .and_then(|(_, v)| match v {
             Value::Float(f) => Some(*f),
             Value::Int(i) => i.as_i64().map(|v| v as f64),
+            _ => None,
+        })
+}
+
+/// A list of GraphQL enum values such as `[content_edit, content_commit]`.
+///
+/// Its own helper for the reason [`enum_arg`] is: a list of strings is a
+/// different literal, and accepting both would be two spellings of one list.
+fn enum_list_arg(d: &Directive<'static, String>, name: &str) -> Option<Vec<String>> {
+    d.arguments
+        .iter()
+        .find(|(n, _)| n == name)
+        .and_then(|(_, v)| match v {
+            Value::List(items) => items
+                .iter()
+                .map(|i| match i {
+                    Value::Enum(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect(),
             _ => None,
         })
 }
