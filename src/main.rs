@@ -23,7 +23,14 @@ OPTIONS:
     --root <dir>      Project root that output paths are relative to (default: .)
     --config <file>   Settings file (default: <root>/rpcgen.toml)
     -h, --help        Show this help.
+    -V, --version     Show the generator version.
 ";
+
+enum Parsed {
+    Run(Args),
+    Help,
+    Version,
+}
 
 struct Args {
     command: Command,
@@ -39,9 +46,13 @@ enum Command {
 
 fn main() -> ExitCode {
     let args = match parse_args() {
-        Ok(Some(args)) => args,
-        Ok(None) => {
+        Ok(Parsed::Run(args)) => args,
+        Ok(Parsed::Help) => {
             print!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        Ok(Parsed::Version) => {
+            println!("graphql-rpcgen {}", graphql_rpcgen::version::CURRENT);
             return ExitCode::SUCCESS;
         }
         Err(message) => {
@@ -59,14 +70,16 @@ fn main() -> ExitCode {
     }
 }
 
-fn parse_args() -> Result<Option<Args>, String> {
+fn parse_args() -> Result<Parsed, String> {
     let mut argv = std::env::args().skip(1);
     let Some(command) = argv.next() else {
         return Err("missing command".to_string());
     };
 
-    if command == "-h" || command == "--help" || command == "help" {
-        return Ok(None);
+    match command.as_str() {
+        "-h" | "--help" | "help" => return Ok(Parsed::Help),
+        "-V" | "--version" | "version" => return Ok(Parsed::Version),
+        _ => {}
     }
 
     let command = match command.as_str() {
@@ -89,12 +102,13 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--config" => {
                 config = Some(argv.next().ok_or("`--config` requires a file")?.into());
             }
-            "-h" | "--help" => return Ok(None),
+            "-h" | "--help" => return Ok(Parsed::Help),
+            "-V" | "--version" => return Ok(Parsed::Version),
             other => return Err(format!("unknown option `{other}`")),
         }
     }
 
-    Ok(Some(Args {
+    Ok(Parsed::Run(Args {
         command,
         api_dir,
         root,

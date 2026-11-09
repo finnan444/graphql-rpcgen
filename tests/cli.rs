@@ -256,6 +256,24 @@ fn help_succeeds_and_prints_usage_on_stdout() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn version_succeeds_and_prints_the_package_version_on_stdout() -> TestResult {
+    let root = project("version")?;
+    let expected = format!("graphql-rpcgen {}\n", env!("CARGO_PKG_VERSION"));
+
+    for args in [
+        &["-V"][..],
+        &["--version"],
+        &["version"],
+        &["generate", "--version"],
+    ] {
+        let out = run(&root, args)?;
+        assert!(out.status.success(), "`{args:?}` must exit zero");
+        assert_eq!(stdout(&out), expected, "`{args:?}`");
+    }
+    Ok(())
+}
+
 /// The failure this whole suite exists for, in the form it actually took: with
 /// no settings file the defaults name no target, so `check` had nothing to
 /// compare, said the files were up to date and exited zero. A consumer's CI

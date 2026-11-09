@@ -938,7 +938,7 @@ just test-one registry     # by test name
 just ci                    # fmt-check, lints as errors, tests
 ```
 
-217 tests, none of which need a network:
+218 tests, none of which need a network:
 
 - **semantic** (96) — every validation rule, the error-code registry, path
   versioning, union tags, which constraint may sit on which type, plus
@@ -964,11 +964,11 @@ just ci                    # fmt-check, lints as errors, tests
   a pass over the whole OpenAPI document for the breaks a per-path assertion
   cannot see: a dangling `$ref`, a duplicated `operationId`, an operation with
   no response
-- **cli** (14) — the binary itself: `generate` writes what `[output]` names and
+- **cli** (15) — the binary itself: `generate` writes what `[output]` names and
   rewrites nothing unchanged, `check` exits non-zero on drift or a missing file
   and names it without repairing it, `--root` is what output paths resolve
-  against, and a bad command or a `--config` that does not exist fails instead
-  of falling back
+  against, `--version` prints the package version, and a bad command or a
+  `--config` that does not exist fails instead of falling back
 - **oneof_wire** (1) — the generated `@oneOf` types compiled and run in a
   scratch cargo project, pinning the wire shape and the arm constraints at
   runtime rather than in emitted text
