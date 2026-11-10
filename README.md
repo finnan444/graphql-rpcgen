@@ -942,7 +942,7 @@ both:
 ```bash
 just test                  # whole suite
 just test-one registry     # by test name
-just ci                    # fmt-check, lints as errors, tests
+just lint                  # cargo deny, fmt-check, clippy, cargo sort, machete
 ```
 
 218 tests, none of which need a network:
